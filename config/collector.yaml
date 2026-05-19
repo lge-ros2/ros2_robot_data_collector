@@ -1,0 +1,14 @@
+collector_node:
+  ros__parameters:
+    namespace_prefix: ""
+    image_topic: "camera/front/image_raw"
+    joint_state_topic: "joint_states"
+    action_topic: "actions"
+    output_path: "/tmp/ros2_robot_data.h5"
+    topic_queue_depth: 64
+    writer_queue_depth: 512
+    batch_size: 32
+    sync_slop_ms: 50
+    flush_interval_ms: 1000
+    approximate_sync: true
+    enable_compression: false
