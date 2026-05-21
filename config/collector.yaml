@@ -3,7 +3,10 @@ collector_node:
     namespace_prefix: ""
     image_topic: "camera/front/image_raw"
     joint_state_topic: "joint_states"
+    lidar_topic: ""
     action_topic: "actions"
+    joint_action_topic: ""
+    cmd_vel_action_topic: ""
     output_path: "/tmp/ros2_robot_data.h5"
     topic_queue_depth: 64
     writer_queue_depth: 512

@@ -147,6 +147,8 @@ void Hdf5Writer::initialize_file(const Frame & frame)
   schema_.image_is_bigendian = frame.image->is_bigendian;
   schema_.image_encoding = frame.image->encoding;
   schema_.joint_names_csv = join_strings(frame.joint_state->names);
+  schema_.action_layout = frame.action.layout;
+  schema_.action_labels_csv = join_strings(frame.action.labels);
 
   if (schema_.image_bytes == 0U) {
     throw std::runtime_error("Image frames must contain pixel data.");
@@ -160,6 +162,7 @@ void Hdf5Writer::initialize_file(const Frame & frame)
 
   file_ = std::make_unique<H5::H5File>(config_.output_path, H5F_ACC_TRUNC);
   file_->createGroup("/meta");
+  file_->createGroup("/episodes");
   file_->createGroup("/observations");
   file_->createGroup("/observations/images");
   file_->createGroup("/observations/joint_state");
@@ -171,6 +174,7 @@ void Hdf5Writer::initialize_file(const Frame & frame)
   write_string_attribute(meta_group, "image_topic", config_.image_topic);
   write_string_attribute(meta_group, "joint_state_topic", config_.joint_state_topic);
   write_string_attribute(meta_group, "action_topic", config_.action_topic);
+  write_string_attribute(meta_group, "joint_action_topic", config_.joint_action_topic);
   write_uint64_attribute(meta_group, "batch_size", static_cast<std::uint64_t>(config_.batch_size));
   write_uint64_attribute(meta_group, "sync_slop_ms", static_cast<std::uint64_t>(config_.sync_slop_ms));
 
@@ -184,6 +188,10 @@ void Hdf5Writer::initialize_file(const Frame & frame)
   auto joint_group = file_->openGroup("/observations/joint_state");
   write_string_attribute(joint_group, "joint_names_csv", schema_.joint_names_csv);
 
+  auto action_group = file_->openGroup("/actions");
+  write_string_attribute(action_group, "layout", schema_.action_layout);
+  write_string_attribute(action_group, "labels_csv", schema_.action_labels_csv);
+
   const hsize_t scalar_initial_dimensions[1] = {0};
   const hsize_t scalar_max_dimensions[1] = {H5S_UNLIMITED};
   const hsize_t scalar_chunk_dimensions[1] = {
@@ -194,6 +202,11 @@ void Hdf5Writer::initialize_file(const Frame & frame)
   timestamps_dataset_ = std::make_unique<H5::DataSet>(file_->createDataSet(
       "/timestamps",
       H5::PredType::NATIVE_INT64,
+      scalar_dataspace,
+      scalar_properties));
+  episode_index_dataset_ = std::make_unique<H5::DataSet>(file_->createDataSet(
+      "/episodes/index",
+      H5::PredType::NATIVE_UINT64,
       scalar_dataspace,
       scalar_properties));
 
@@ -278,6 +291,7 @@ void Hdf5Writer::flush_batch(std::vector<Frame> frames, const bool force_flush)
     }
 
     std::vector<std::int64_t> timestamps;
+    std::vector<std::uint64_t> episode_indices;
     std::vector<std::uint8_t> images;
     std::vector<double> joint_positions;
     std::vector<double> joint_velocities;
@@ -285,6 +299,7 @@ void Hdf5Writer::flush_batch(std::vector<Frame> frames, const bool force_flush)
     std::vector<double> actions;
 
     timestamps.reserve(accepted_frames.size());
+    episode_indices.reserve(accepted_frames.size());
     images.reserve(accepted_frames.size() * schema_.image_bytes);
     joint_positions.reserve(accepted_frames.size() * schema_.joint_count);
     joint_velocities.reserve(accepted_frames.size() * schema_.joint_count);
@@ -292,6 +307,7 @@ void Hdf5Writer::flush_batch(std::vector<Frame> frames, const bool force_flush)
     actions.reserve(accepted_frames.size() * schema_.action_count);
 
     for (const auto & frame : accepted_frames) {
+      episode_indices.push_back(frame.episode_index);
       timestamps.push_back(frame.stamp_ns);
       images.insert(images.end(), frame.image->data.begin(), frame.image->data.end());
       joint_positions.insert(
@@ -303,6 +319,7 @@ void Hdf5Writer::flush_batch(std::vector<Frame> frames, const bool force_flush)
       actions.insert(actions.end(), frame.action.values.begin(), frame.action.values.end());
     }
 
+    append_1d_u64(*episode_index_dataset_, episode_indices);
     append_1d_i64(*timestamps_dataset_, timestamps);
     append_2d_u8(*image_dataset_, images, accepted_frames.size(), schema_.image_bytes);
     append_2d_f64(*joint_positions_dataset_, joint_positions, accepted_frames.size(), schema_.joint_count);
@@ -332,7 +349,9 @@ bool Hdf5Writer::validate_frame(const Frame & frame) const
          frame.joint_state->positions.size() == schema_.joint_count &&
          frame.joint_state->velocities.size() == schema_.joint_count &&
          frame.joint_state->efforts.size() == schema_.joint_count &&
-         frame.action.values.size() == schema_.action_count;
+      frame.action.values.size() == schema_.action_count &&
+      frame.action.layout == schema_.action_layout &&
+      join_strings(frame.action.labels) == schema_.action_labels_csv;
 }
 
 void Hdf5Writer::flush_file(const bool force_flush)
@@ -410,6 +429,26 @@ void Hdf5Writer::append_1d_i64(H5::DataSet & dataset, const std::vector<std::int
   file_space.selectHyperslab(H5S_SELECT_SET, append_count, previous_dimensions);
   const H5::DataSpace memory_space(1, append_count);
   dataset.write(values.data(), H5::PredType::NATIVE_INT64, memory_space, file_space);
+}
+
+void Hdf5Writer::append_1d_u64(H5::DataSet & dataset, const std::vector<std::uint64_t> & values)
+{
+  if (values.empty()) {
+    return;
+  }
+
+  hsize_t previous_dimensions[1] = {0};
+  H5::DataSpace file_space = dataset.getSpace();
+  file_space.getSimpleExtentDims(previous_dimensions);
+
+  const hsize_t append_count[1] = {static_cast<hsize_t>(values.size())};
+  const hsize_t new_dimensions[1] = {previous_dimensions[0] + append_count[0]};
+  dataset.extend(new_dimensions);
+
+  file_space = dataset.getSpace();
+  file_space.selectHyperslab(H5S_SELECT_SET, append_count, previous_dimensions);
+  const H5::DataSpace memory_space(1, append_count);
+  dataset.write(values.data(), H5::PredType::NATIVE_UINT64, memory_space, file_space);
 }
 
 void Hdf5Writer::append_2d_f64(

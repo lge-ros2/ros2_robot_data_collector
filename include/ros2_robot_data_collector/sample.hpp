@@ -7,8 +7,11 @@
 #include <string>
 #include <vector>
 
+#include "control_msgs/msg/joint_jog.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 
 namespace ros2_robot_data_collector
@@ -40,17 +43,35 @@ struct JointStateSample
   std::vector<double> efforts;
 };
 
+struct LidarScanSample
+{
+  std::int64_t stamp_ns;
+  double angle_min;
+  double angle_max;
+  double angle_increment;
+  double time_increment;
+  double scan_time;
+  double range_min;
+  double range_max;
+  std::vector<double> ranges;
+  std::vector<double> intensities;
+};
+
 struct ActionSample
 {
   std::int64_t stamp_ns;
   std::vector<double> values;
+  std::vector<std::string> labels;
+  std::string layout;
 };
 
 struct Frame
 {
+  std::uint64_t episode_index;
   std::int64_t stamp_ns;
   std::shared_ptr<const ImageSample> image;
   std::shared_ptr<const JointStateSample> joint_state;
+  std::shared_ptr<const LidarScanSample> lidar;
   ActionSample action;
 };
 
@@ -65,6 +86,21 @@ inline std::vector<double> normalize_numeric_field(
   const std::size_t target_size)
 {
   std::vector<double> normalized = values;
+  normalized.resize(target_size, std::numeric_limits<double>::quiet_NaN());
+  return normalized;
+}
+
+inline std::vector<double> normalize_numeric_field(
+  const std::vector<float> & values,
+  const std::size_t target_size)
+{
+  std::vector<double> normalized;
+  normalized.reserve(target_size);
+
+  for (const float value : values) {
+    normalized.push_back(static_cast<double>(value));
+  }
+
   normalized.resize(target_size, std::numeric_limits<double>::quiet_NaN());
   return normalized;
 }
@@ -104,6 +140,98 @@ inline ActionSample make_action_sample(
   ActionSample sample;
   sample.stamp_ns = stamp_ns;
   sample.values = message.data;
+  sample.layout = "float64_multi_array";
+  return sample;
+}
+
+inline ActionSample make_action_sample(
+  const geometry_msgs::msg::Twist & message,
+  const std::int64_t stamp_ns)
+{
+  ActionSample sample;
+  sample.stamp_ns = stamp_ns;
+  sample.layout = "twist_linear_then_angular";
+  sample.values = {
+    message.linear.x,
+    message.linear.y,
+    message.linear.z,
+    message.angular.x,
+    message.angular.y,
+    message.angular.z};
+  sample.labels = {
+    "linear/x",
+    "linear/y",
+    "linear/z",
+    "angular/x",
+    "angular/y",
+    "angular/z"};
+  return sample;
+}
+
+inline std::vector<std::string> make_joint_jog_action_labels(
+  const std::vector<std::string> & joint_names,
+  const std::size_t target_size)
+{
+  std::vector<std::string> normalized_names = joint_names;
+  normalized_names.resize(target_size);
+
+  std::vector<std::string> labels;
+  labels.reserve(target_size * 2U);
+
+  for (std::size_t index = 0; index < target_size; ++index) {
+    const std::string base_name = normalized_names[index].empty() ?
+      ("joint_" + std::to_string(index + 1U)) : normalized_names[index];
+    labels.push_back(base_name + "/displacement");
+  }
+
+  for (std::size_t index = 0; index < target_size; ++index) {
+    const std::string base_name = normalized_names[index].empty() ?
+      ("joint_" + std::to_string(index + 1U)) : normalized_names[index];
+    labels.push_back(base_name + "/velocity");
+  }
+
+  return labels;
+}
+
+inline ActionSample make_action_sample(
+  const control_msgs::msg::JointJog & message,
+  const std::int64_t stamp_ns)
+{
+  const std::size_t joint_count = std::max(
+    {message.joint_names.size(), message.displacements.size(), message.velocities.size()});
+
+  ActionSample sample;
+  sample.stamp_ns = stamp_ns;
+  sample.layout = "joint_jog_displacements_then_velocities";
+
+  if (joint_count == 0U) {
+    return sample;
+  }
+
+  const std::vector<double> displacements = normalize_numeric_field(message.displacements, joint_count);
+  const std::vector<double> velocities = normalize_numeric_field(message.velocities, joint_count);
+
+  sample.values.reserve(joint_count * 2U);
+  sample.values.insert(sample.values.end(), displacements.begin(), displacements.end());
+  sample.values.insert(sample.values.end(), velocities.begin(), velocities.end());
+  sample.labels = make_joint_jog_action_labels(message.joint_names, joint_count);
+  return sample;
+}
+
+inline std::shared_ptr<LidarScanSample> make_lidar_scan_sample(
+  const sensor_msgs::msg::LaserScan & message)
+{
+  auto sample = std::make_shared<LidarScanSample>();
+  sample->stamp_ns = to_nanoseconds(message.header.stamp);
+  sample->angle_min = static_cast<double>(message.angle_min);
+  sample->angle_max = static_cast<double>(message.angle_max);
+  sample->angle_increment = static_cast<double>(message.angle_increment);
+  sample->time_increment = static_cast<double>(message.time_increment);
+  sample->scan_time = static_cast<double>(message.scan_time);
+  sample->range_min = static_cast<double>(message.range_min);
+  sample->range_max = static_cast<double>(message.range_max);
+  sample->ranges = normalize_numeric_field(message.ranges, message.ranges.size());
+  sample->intensities = normalize_numeric_field(message.intensities, message.ranges.size());
   return sample;
 }
 

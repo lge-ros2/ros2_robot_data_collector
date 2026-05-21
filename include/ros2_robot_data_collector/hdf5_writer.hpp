@@ -45,6 +45,8 @@ private:
     std::uint8_t image_is_bigendian = 0;
     std::string image_encoding;
     std::string joint_names_csv;
+    std::string action_layout;
+    std::string action_labels_csv;
   };
 
   void writer_loop();
@@ -57,6 +59,7 @@ private:
   void write_uint32_attribute(H5::H5Object & object, const std::string & name, std::uint32_t value);
   void write_uint8_attribute(H5::H5Object & object, const std::string & name, std::uint8_t value);
   void append_1d_i64(H5::DataSet & dataset, const std::vector<std::int64_t> & values);
+  void append_1d_u64(H5::DataSet & dataset, const std::vector<std::uint64_t> & values);
   void append_2d_f64(
     H5::DataSet & dataset,
     const std::vector<double> & values,
@@ -81,6 +84,7 @@ private:
 
   std::unique_ptr<H5::H5File> file_;
   std::unique_ptr<H5::DataSet> timestamps_dataset_;
+  std::unique_ptr<H5::DataSet> episode_index_dataset_;
   std::unique_ptr<H5::DataSet> image_dataset_;
   std::unique_ptr<H5::DataSet> joint_positions_dataset_;
   std::unique_ptr<H5::DataSet> joint_velocities_dataset_;

@@ -14,7 +14,10 @@ struct CollectorConfig
   std::string namespace_prefix;
   std::string image_topic;
   std::string joint_state_topic;
+  std::string lidar_topic;
   std::string action_topic;
+  std::string joint_action_topic;
+  std::string cmd_vel_action_topic;
   std::string output_path;
   std::size_t topic_queue_depth;
   std::size_t writer_queue_depth;
@@ -31,7 +34,10 @@ inline CollectorConfig load_collector_config(rclcpp::Node & node)
   config.namespace_prefix = node.declare_parameter<std::string>("namespace_prefix", "");
   config.image_topic = node.declare_parameter<std::string>("image_topic", "camera/front/image_raw");
   config.joint_state_topic = node.declare_parameter<std::string>("joint_state_topic", "joint_states");
+  config.lidar_topic = node.declare_parameter<std::string>("lidar_topic", "");
   config.action_topic = node.declare_parameter<std::string>("action_topic", "actions");
+  config.joint_action_topic = node.declare_parameter<std::string>("joint_action_topic", "");
+  config.cmd_vel_action_topic = node.declare_parameter<std::string>("cmd_vel_action_topic", "");
   config.output_path = node.declare_parameter<std::string>("output_path", "/tmp/ros2_robot_data.h5");
   config.topic_queue_depth = static_cast<std::size_t>(
     node.declare_parameter<int>("topic_queue_depth", 64));
@@ -57,6 +63,18 @@ inline CollectorConfig load_collector_config(rclcpp::Node & node)
   }
   if (config.flush_interval_ms <= 0) {
     throw std::invalid_argument("flush_interval_ms must be greater than zero.");
+  }
+
+  const bool has_numeric_action_topic = !config.action_topic.empty();
+  const bool has_joint_action_topic = !config.joint_action_topic.empty();
+  const bool has_cmd_vel_action_topic = !config.cmd_vel_action_topic.empty();
+  const int configured_action_topic_count =
+    static_cast<int>(has_numeric_action_topic) +
+    static_cast<int>(has_joint_action_topic) +
+    static_cast<int>(has_cmd_vel_action_topic);
+  if (configured_action_topic_count != 1) {
+    throw std::invalid_argument(
+            "Exactly one of action_topic, joint_action_topic, or cmd_vel_action_topic must be configured.");
   }
 
   return config;

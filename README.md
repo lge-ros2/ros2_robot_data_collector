@@ -2,26 +2,26 @@
 
 Namespace-aware ROS 2 data collector that synchronizes observations and actions and writes them to HDF5.
 
-This package is usable today for one image stream, one joint-state stream, and one numeric action stream. It is not yet a full CLOiSim dataset recorder for `joint_command`, LiDAR, odometry, IMU, or explicit episode markers.
+Current implementation scope:
 
-## Current Scope
+- one `sensor_msgs/msg/Image` stream
+- one `sensor_msgs/msg/JointState` stream
+- exactly one action source chosen from:
+  - `std_msgs/msg/Float64MultiArray` on `action_topic`
+  - `control_msgs/msg/JointJog` on `joint_action_topic`
+- explicit episode control through services
+  - `/collector_node/start_episode`
+  - `/collector_node/end_episode`
 
-Supported today:
+Still not supported:
 
-- one `sensor_msgs/msg/Image` topic
-- one `sensor_msgs/msg/JointState` topic
-- one `std_msgs/msg/Float64MultiArray` action topic
-- HDF5 output with timestamps, images, joint positions/velocities/efforts, and actions
-
-Not supported today:
-
-- direct `control_msgs/msg/JointJog` capture from `joint_command`
-- direct `geometry_msgs/msg/Twist` capture from `cmd_vel`
-- `sensor_msgs/msg/LaserScan` or `sensor_msgs/msg/PointCloud2`
+- `geometry_msgs/msg/Twist` directly from `cmd_vel`
+- `sensor_msgs/msg/LaserScan`
+- `sensor_msgs/msg/PointCloud2`
 - `nav_msgs/msg/Odometry`
 - `sensor_msgs/msg/Imu`
 - multiple image streams at the same time, such as RGB + depth
-- explicit episode start/end marker topic or service
+- automatic file rotation per episode
 
 ## Workspace Rule
 
@@ -41,7 +41,7 @@ Do not run `colcon build`, `colcon test`, `ros2 launch`, or `ros2 run` from this
 
 ## Dependencies
 
-- ROS 2 with `rclcpp`, `sensor_msgs`, and `std_msgs`
+- ROS 2 with `rclcpp`, `control_msgs`, `sensor_msgs`, `std_msgs`, and `std_srvs`
 - HDF5 development libraries (`libhdf5-dev`)
 - CMake 3.16+
 - C++17 compiler
@@ -57,35 +57,44 @@ source install/setup.bash
 
 ## CLOiSim Topic Audit
 
-The current collector was compared against `cloisim_ros` topic publishers and subscribers. For a robot whose model namespace is `CLOiD`, the practical mapping is:
+The current collector was compared against `cloisim_ros` publishers and subscribers. For a robot whose model namespace is `CLOiD`, the practical mapping is:
 
 | Signal | Typical CLOiSim topic under `CLOiD` | Message type | Status in this collector | Notes |
 | --- | --- | --- | --- | --- |
-| Joint state | `/CLOiD/joint_states` | `sensor_msgs/msg/JointState` | Supported now | Published by CLOiSim joint control. This is the most important state topic and already fits the current HDF5 schema. |
-| Joint action | `/CLOiD/joint_command` | `control_msgs/msg/JointJog` | Not supported yet | This is the natural action source for articulated robots, but the collector only records `Float64MultiArray` actions today. |
-| Mobile action | `/CLOiD/cmd_vel` | `geometry_msgs/msg/Twist` | Not supported yet | Relevant for mobile robots using micom. Not recorded by the current collector. |
-| RGB image | `/CLOiD/<camera_part>/camera/image_raw` | `sensor_msgs/msg/Image` | Supported with configuration | `<camera_part>` depends on the SDF part name. You must inspect the actual topic and configure it explicitly. |
+| Joint state | `/CLOiD/joint_states` | `sensor_msgs/msg/JointState` | Supported now | This is the most important state topic and fits the current HDF5 schema directly. |
+| Joint action | `/CLOiD/joint_command` | `control_msgs/msg/JointJog` | Supported now | Configure `joint_action_topic` and leave `action_topic` empty. The HDF5 action vector is stored as `[displacements..., velocities...]`. |
+| Mobile action | `/CLOiD/cmd_vel` | `geometry_msgs/msg/Twist` | Not supported yet | Still requires code changes if you want direct mobile-base action capture. |
+| RGB image | `/CLOiD/<camera_part>/camera/image_raw` | `sensor_msgs/msg/Image` | Supported with configuration | `<camera_part>` depends on the SDF part name. Inspect the actual topic first. |
 | Depth image | `/CLOiD/<depth_part>/depth/image_rect_raw` | `sensor_msgs/msg/Image` | Supported as an alternate single image stream | You can record depth instead of RGB, but not RGB and depth simultaneously. |
 | LiDAR | `/CLOiD/scan` | `sensor_msgs/msg/LaserScan` or `sensor_msgs/msg/PointCloud2` | Not supported yet | Requires new subscribers and a new HDF5 schema. |
 | Odometry | `/CLOiD/odom` | `nav_msgs/msg/Odometry` | Not supported yet | Useful state for mobile training, but not recorded today. |
 | IMU | `/CLOiD/imu/data_raw` or `/CLOiD/<realsense_part>/imu` | `sensor_msgs/msg/Imu` | Not supported yet | Exact topic depends on the sensor plugin. |
 | Range / sonar / IR | `/CLOiD/<range_part>/range` | `sensor_msgs/msg/Range` | Not supported yet | Requires new subscribers and dataset layout. |
 
-The biggest mismatch is action capture. CLOiSim already uses `joint_command` or `cmd_vel`, but this collector expects a numeric `Float64MultiArray` on `action_topic`.
+The main remaining gap for CLOiSim training is `cmd_vel` and LiDAR, not `joint_command`.
 
 ## HDF5 Output Today
 
-The current writer creates:
+The writer currently creates:
 
 - `/timestamps`
+- `/episodes/index`
 - `/observations/images/data`
 - `/observations/joint_state/positions`
 - `/observations/joint_state/velocities`
 - `/observations/joint_state/efforts`
 - `/actions/data`
 - metadata under `/meta`
+- action metadata under `/actions`
 
-The first accepted frame locks the schema. Later frames with a different image shape, encoding, joint layout, or action vector size are rejected.
+Action metadata includes:
+
+- `layout`
+- `labels_csv`
+
+For `joint_action_topic`, the layout is `joint_jog_displacements_then_velocities`.
+
+The first accepted frame locks the schema. Later frames with a different image shape, joint layout, or action layout are rejected.
 
 ## Inspect Actual CLOiSim Topics First
 
@@ -111,6 +120,7 @@ export ROBOT_NS=/CLOiD
 
 ros2 topic list | grep "^${ROBOT_NS}/" | sort
 ros2 topic info ${ROBOT_NS}/joint_states
+ros2 topic info ${ROBOT_NS}/joint_command
 ros2 topic list | grep "^${ROBOT_NS}/.*/camera/image_raw$"
 ros2 topic list | grep "^${ROBOT_NS}/.*/depth/image_rect_raw$"
 ros2 topic info ${ROBOT_NS}/scan
@@ -121,48 +131,18 @@ Useful spot checks:
 
 ```bash
 ros2 topic echo --once ${ROBOT_NS}/joint_states
-ros2 topic echo --once ${ROBOT_NS}/scan
+ros2 topic echo --once ${ROBOT_NS}/joint_command
 ```
 
 Pick the exact camera topic after inspection. For example, if CLOiSim publishes `/CLOiD/front_camera/camera/image_raw`, use that exact path instead of guessing from defaults.
 
-## Run The Collector Against CLOiSim Today
+## How To Run It For CLOiD
 
-### Recommended Path: Use `ros2 run` With Absolute Topic Names
+### Recommended Path For Joint-Controlled Robots
 
-This is the safest runtime path because the current launch file only exposes `params_file`, `namespace_prefix`, and `output_path`. It does not expose `image_topic`, `joint_state_topic`, or `action_topic` as launch arguments.
+For `joint_command`, the cleanest runtime path is a params YAML because `action_topic` must be empty and `joint_action_topic` must be set.
 
-Example with a `CLOiD` robot and one discovered camera topic:
-
-```bash
-cd /home/yg/Workspace/cloi_ws
-source /opt/ros/$ROS_DISTRO/setup.bash
-source install/setup.bash
-
-export ROBOT_NS=/CLOiD
-export CAMERA_TOPIC=/CLOiD/front_camera/camera/image_raw
-
-ros2 run ros2_robot_data_collector collector_node --ros-args \
-  -p namespace_prefix:="" \
-  -p image_topic:="$CAMERA_TOPIC" \
-  -p joint_state_topic:="$ROBOT_NS/joint_states" \
-  -p action_topic:="$ROBOT_NS/actions" \
-  -p output_path:=/tmp/CLOiD_episode_0001.h5 \
-  -p sync_slop_ms:=100 \
-  -p batch_size:=32 \
-  -p flush_interval_ms:=1000
-```
-
-Why `namespace_prefix` is empty here:
-
-- absolute topic names already include `/CLOiD/...`
-- camera topics often include a part name, so absolute paths are clearer than mixing a namespace prefix with a guessed relative path
-
-### Optional Path: Use `ros2 launch` With A Custom Params File
-
-If you prefer `ros2 launch`, create a custom params YAML that overrides the exact topics. The built-in launch file does not expose those topic names directly.
-
-Example YAML content:
+Create a config file:
 
 ```yaml
 collector_node:
@@ -170,153 +150,147 @@ collector_node:
     namespace_prefix: ""
     image_topic: "/CLOiD/front_camera/camera/image_raw"
     joint_state_topic: "/CLOiD/joint_states"
-    action_topic: "/CLOiD/actions"
-    output_path: "/tmp/CLOiD_episode_0001.h5"
+    action_topic: ""
+    joint_action_topic: "/CLOiD/joint_command"
+    output_path: "/tmp/CLOiD_episode_data.h5"
     sync_slop_ms: 100
+    batch_size: 32
+    flush_interval_ms: 1000
 ```
 
-Then launch:
+Run the collector:
 
 ```bash
 cd /home/yg/Workspace/cloi_ws
 source /opt/ros/$ROS_DISTRO/setup.bash
 source install/setup.bash
-ros2 launch ros2_robot_data_collector collector.launch.py \
-  params_file:=/path/to/collector_cloid.yaml \
-  output_path:=/tmp/CLOiD_episode_0001.h5
+ros2 run ros2_robot_data_collector collector_node --ros-args --params-file /path/to/collector_cloid_joint.yaml
 ```
 
-## Action Semantics For Training
+### Alternative Path For Numeric Action Topics
 
-### What You Probably Want
+If you already have a numeric action topic such as `/CLOiD/actions`, keep `action_topic` set and leave `joint_action_topic` empty.
 
-For a CLOiSim articulated robot, the natural action is usually:
+Exactly one action source must be configured. If both are set, the node rejects the configuration on startup.
 
-- `/CLOiD/joint_command` with `control_msgs/msg/JointJog`
+## What Gets Stored As Action
 
-For a mobile robot, the natural action is often:
+### `action_topic`
 
-- `/CLOiD/cmd_vel` with `geometry_msgs/msg/Twist`
+If you use `std_msgs/msg/Float64MultiArray`, the raw numeric vector is stored in `/actions/data`.
 
-### What The Collector Actually Records Today
+### `joint_action_topic`
 
-The collector only records:
+If you use `control_msgs/msg/JointJog`, the collector flattens each message into:
 
-- `std_msgs/msg/Float64MultiArray` on `action_topic`
+```text
+[joint_1_displacement, joint_2_displacement, ..., joint_1_velocity, joint_2_velocity, ...]
+```
 
-That means the collector cannot directly capture your real CLOiSim control command yet. If your training dataset must store actions now, you need a numeric mirror topic such as `/CLOiD/actions` whose vector layout you define and keep consistent.
+Missing displacement or velocity values are padded with `NaN` to keep a fixed action width.
 
-Examples:
+The corresponding labels are written into the HDF5 `/actions` metadata as `labels_csv`.
 
-- joint robot convention: `[joint_1_displacement, joint_1_velocity, joint_2_displacement, joint_2_velocity, ...]`
-- mobile robot convention: `[linear_x, linear_y, angular_z]`
+Example labels:
 
-### Practical Joint Example Today
+```text
+joint_1/displacement,joint_2/displacement,joint_1/velocity,joint_2/velocity
+```
 
-Terminal 1, collector:
+## Episode Semantics
+
+The collector starts in `episode 1` and accepts frames immediately.
+
+Explicit episode control is now available through two services:
+
+- `/collector_node/start_episode`
+- `/collector_node/end_episode`
+
+Behavior:
+
+- `end_episode` stops accepting new action-triggered frames
+- `start_episode` begins the next episode index
+- each accepted frame stores its episode number in `/episodes/index`
+- the HDF5 file stays open; episodes are segmented inside one file
+
+### Example Episode Flow
+
+Terminal 1, start the collector:
 
 ```bash
 cd /home/yg/Workspace/cloi_ws
 source /opt/ros/$ROS_DISTRO/setup.bash
 source install/setup.bash
-
-export ROBOT_NS=/CLOiD
-export CAMERA_TOPIC=/CLOiD/front_camera/camera/image_raw
-
-ros2 run ros2_robot_data_collector collector_node --ros-args \
-  -p namespace_prefix:="" \
-  -p image_topic:="$CAMERA_TOPIC" \
-  -p joint_state_topic:="$ROBOT_NS/joint_states" \
-  -p action_topic:="$ROBOT_NS/actions" \
-  -p output_path:=/tmp/CLOiD_episode_0001.h5
+ros2 run ros2_robot_data_collector collector_node --ros-args --params-file /path/to/collector_cloid_joint.yaml
 ```
 
-Terminal 2, publish the numeric training action that will be stored in HDF5:
+Terminal 2, send robot actions during episode 1:
 
 ```bash
 cd /home/yg/Workspace/cloi_ws
 source /opt/ros/$ROS_DISTRO/setup.bash
 source install/setup.bash
-
-ros2 topic pub -1 /CLOiD/actions std_msgs/msg/Float64MultiArray \
-"{data: [-1.5708, 2.0]}"
-```
-
-Terminal 3, send the real CLOiSim joint command:
-
-```bash
-cd /home/yg/Workspace/cloi_ws
-source /opt/ros/$ROS_DISTRO/setup.bash
-source install/setup.bash
-
 ros2 topic pub -1 /CLOiD/joint_command control_msgs/msg/JointJog \
 "{joint_names: ['link_Display_JOINT'], displacements: [-1.5708], velocities: [2.0]}"
 ```
 
-This is only a workaround. The stored action vector and the real `JointJog` command can drift if you do not keep the conventions and timing aligned.
+When the behavior for that episode is finished:
 
-### Timing Caveat
+```bash
+cd /home/yg/Workspace/cloi_ws
+source /opt/ros/$ROS_DISTRO/setup.bash
+source install/setup.bash
+ros2 service call /collector_node/end_episode std_srvs/srv/Trigger '{}'
+```
 
-The current collector timestamps actions with collector receive time, not with a message header. CLOiSim sensor streams use simulator timestamps. Because of that mismatch:
+Start the next episode in the same file:
 
-- publish the numeric `/CLOiD/actions` message as close as possible to the real control command
+```bash
+cd /home/yg/Workspace/cloi_ws
+source /opt/ros/$ROS_DISTRO/setup.bash
+source install/setup.bash
+ros2 service call /collector_node/start_episode std_srvs/srv/Trigger '{}'
+```
+
+If you prefer one file per episode instead of one file with `/episodes/index`, restart the collector with a different `output_path` for each run.
+
+### What `end_episode` Does Not Do
+
+It does not:
+
+- close the file
+- rotate to a new file automatically
+- emit success or failure labels
+- reset queues
+
+It only stops accepting new action-triggered frames until `start_episode` is called again.
+
+## Timing Caveat
+
+Action timestamps still use collector receive time, not a timestamp from the action message header. CLOiSim sensor streams use simulator timestamps. Because of that mismatch:
+
+- publish actions as close as possible to the actual control moment
 - keep `sync_slop_ms` realistic for your simulator timing
-- do not assume strict replay-perfect alignment from the current implementation
-
-## Episode Semantics Today
-
-### Current Behavior
-
-There is no explicit episode marker topic or service in the current collector.
-
-Today, the practical episode boundary is:
-
-- one collector process per episode
-- one output file per episode
-- end the episode by stopping the collector process
-
-Example workflow:
-
-1. Start collector with `output_path:=/data/CLOiD_episode_0001.h5`.
-2. Run the task and publish matching numeric actions on `/CLOiD/actions`.
-3. When the episode ends, stop the collector with `Ctrl-C`.
-4. Start the next episode with a new output path such as `/data/CLOiD_episode_0002.h5`.
-
-What `Ctrl-C` means here:
-
-- it stops the node
-- the writer thread flushes pending data
-- the HDF5 file is finalized and closed
-
-### What Is Not Available Yet
-
-These commands do not exist today:
-
-- no `/end_episode` service
-- no `/episode_marker` topic
-- no automatic file rotation per episode
-- no success or failure label channel
-
-If you need explicit episode boundaries, that requires code changes.
+- do not assume replay-perfect temporal alignment from the current implementation
 
 ## Should LiDAR Become A Dataset?
 
 Probably yes, but not with the current implementation.
 
-If your policy depends on navigation or obstacle avoidance, LiDAR is a reasonable training observation. The problem is not whether LiDAR is useful. The problem is schema design.
+If your policy depends on navigation or obstacle avoidance, LiDAR is a reasonable training observation. The problem is schema design, not usefulness.
 
 Current constraints:
 
-- the collector only knows how to store one image stream, one joint-state stream, and one numeric action stream
+- the collector still only stores one image stream, one joint-state stream, one action stream, and one episode index stream
 - CLOiSim LiDAR can publish either `LaserScan` or `PointCloud2`
-- `LaserScan` is easier to store than `PointCloud2`, but still needs a new subscriber and a new HDF5 group
-- `PointCloud2` is larger and more complex, and needs a more careful storage layout
+- `LaserScan` is simpler than `PointCloud2`, but still needs a new subscriber and a new HDF5 group
+- `PointCloud2` needs a more careful storage layout and likely a new schema version
 
-Practical recommendation:
+Practical next order:
 
-1. First add direct `joint_command` action capture.
-2. Then add `LaserScan` support if LiDAR is important for the task.
-3. Add `PointCloud2`, odometry, IMU, and explicit episode markers only after the basic action path is correct.
+1. Add `cmd_vel` support if mobile-base actions matter.
+2. Add `LaserScan` support if LiDAR is part of the policy input.
+3. Add `PointCloud2`, odometry, and IMU only after the action path is settled.
 
 ## Parameters
 
@@ -327,7 +301,8 @@ Default values are defined in [config/collector.yaml](config/collector.yaml).
 | `namespace_prefix` | `""` | Prefix applied only when a topic name is relative. Absolute topic names bypass this. |
 | `image_topic` | `camera/front/image_raw` | Image topic to subscribe to. This default is usually not the exact CLOiSim camera topic. |
 | `joint_state_topic` | `joint_states` | Joint-state topic to subscribe to. |
-| `action_topic` | `actions` | Numeric action topic to subscribe to. |
+| `action_topic` | `actions` | Numeric action topic. Leave this empty if you use `joint_action_topic`. |
+| `joint_action_topic` | `""` | `control_msgs/msg/JointJog` action topic. Leave this empty if you use `action_topic`. |
 | `output_path` | `/tmp/ros2_robot_data.h5` | Destination HDF5 file path. |
 | `topic_queue_depth` | `64` | Bounded queue size for image and joint-state samples. |
 | `writer_queue_depth` | `512` | Bounded queue size for frames waiting to be written. |
@@ -350,54 +325,20 @@ colcon test --packages-select ros2_robot_data_collector
 colcon test-result --verbose
 ```
 
-Current automated coverage is limited to helper logic:
+Current automated coverage includes:
 
 - [test/test_sync_policy.cpp](test/test_sync_policy.cpp)
 - [test/test_topic_resolution.cpp](test/test_topic_resolution.cpp)
+- [test/test_action_sample.cpp](test/test_action_sample.cpp)
 
-### Manual Smoke Test
+### Manual Smoke Tests Already Verified
 
-This validates the collector path itself, not CLOiSim integration.
+The following were verified during development:
 
-Terminal 1:
-
-```bash
-cd /home/yg/Workspace/cloi_ws
-source /opt/ros/$ROS_DISTRO/setup.bash
-source install/setup.bash
-ros2 run ros2_robot_data_collector collector_node --ros-args \
-  -p output_path:=/tmp/collector_smoke.h5 \
-  -p sync_slop_ms:=5000 \
-  -p batch_size:=1 \
-  -p flush_interval_ms:=100
-```
-
-Terminal 2:
-
-```bash
-cd /home/yg/Workspace/cloi_ws
-source /opt/ros/$ROS_DISTRO/setup.bash
-source install/setup.bash
-
-stamp_sec=$(date +%s)
-stamp_nsec=$(date +%N)
-
-ros2 topic pub --once /camera/front/image_raw sensor_msgs/msg/Image \
-"{header: {stamp: {sec: $stamp_sec, nanosec: $stamp_nsec}, frame_id: camera_front}, height: 1, width: 1, encoding: mono8, is_bigendian: 0, step: 1, data: [42]}"
-
-ros2 topic pub --once /joint_states sensor_msgs/msg/JointState \
-"{header: {stamp: {sec: $stamp_sec, nanosec: $stamp_nsec}}, name: [joint_1, joint_2], position: [0.1, 0.2], velocity: [0.0, 0.0], effort: [0.0, 0.0]}"
-
-ros2 topic pub --once /actions std_msgs/msg/Float64MultiArray \
-"{data: [0.5, 0.6]}"
-
-ls -l /tmp/collector_smoke.h5
-```
-
-Expected result:
-
-- the node logs `frames=1` and `sync_miss=0`
-- `/tmp/collector_smoke.h5` exists
+- numeric action capture still writes HDF5 output
+- `joint_action_topic` accepts `control_msgs/msg/JointJog`
+- `/collector_node/end_episode` stops new frames from being accepted
+- `/episodes/index` is written alongside accepted frames
 
 If you want to inspect the HDF5 structure with `h5ls`, install:
 
@@ -407,18 +348,19 @@ sudo apt install hdf5-tools
 
 ## Known Limitations
 
-- action timestamps currently use collector receive time, not a timestamp carried by the action message
+- action timestamps still use collector receive time
 - queue sizes are bounded, so old samples can be dropped under load
 - only one image stream is supported at a time
 - the first accepted frame fixes the output schema
-- there is no direct support for `joint_command`, `cmd_vel`, LiDAR, odometry, IMU, or explicit episode markers
+- `cmd_vel`, LiDAR, odometry, IMU, and range sensors are still unsupported
+- there is no automatic file rotation per episode
 - [src/sample_data_publisher.cpp](src/sample_data_publisher.cpp) exists but is not added as a CMake target, so it cannot be run with `ros2 run` yet
-- there is no automated end-to-end integration test for CLOiSim
 
 ## Code Layout
 
-- [src/collector_node.cpp](src/collector_node.cpp): ROS 2 node and synchronization logic
+- [src/collector_node.cpp](src/collector_node.cpp): ROS 2 node, action subscriptions, and episode services
 - [src/hdf5_writer.cpp](src/hdf5_writer.cpp): HDF5 writer thread and dataset management
 - [include/ros2_robot_data_collector/collector_config.hpp](include/ros2_robot_data_collector/collector_config.hpp): parameter loading and validation
+- [include/ros2_robot_data_collector/sample.hpp](include/ros2_robot_data_collector/sample.hpp): message-to-sample conversion, including `JointJog`
 - [include/ros2_robot_data_collector/topic_resolver.hpp](include/ros2_robot_data_collector/topic_resolver.hpp): namespace-aware topic resolution
 - [include/ros2_robot_data_collector/sync_policy.hpp](include/ros2_robot_data_collector/sync_policy.hpp): timestamp window checks
