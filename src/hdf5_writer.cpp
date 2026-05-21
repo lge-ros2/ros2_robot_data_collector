@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <sstream>
+#include <unordered_set>
 #include <utility>
 
 #include "rclcpp/rclcpp.hpp"
@@ -24,6 +25,20 @@ std::string join_strings(const std::vector<std::string> & values)
     stream << values[index];
   }
   return stream.str();
+}
+
+bool has_distinct_non_empty_strings(const std::vector<std::string> & values)
+{
+  std::unordered_set<std::string> unique_values;
+  unique_values.reserve(values.size());
+
+  for (const auto & value : values) {
+    if (value.empty() || !unique_values.insert(value).second) {
+      return false;
+    }
+  }
+
+  return !values.empty();
 }
 
 H5::DSetCreatPropList make_creation_properties(
@@ -138,9 +153,15 @@ void Hdf5Writer::initialize_file(const Frame & frame)
     throw std::runtime_error("Cannot initialize HDF5 schema without a complete frame.");
   }
 
+  if (!has_distinct_non_empty_strings(frame.joint_state->names)) {
+    throw std::runtime_error(
+            "Joint state frames must provide distinct non-empty joint names before the schema is initialized.");
+  }
+
   schema_.image_bytes = frame.image->data.size();
   schema_.joint_count = frame.joint_state->positions.size();
   schema_.action_count = frame.action.values.size();
+  schema_.has_lidar = static_cast<bool>(frame.lidar);
   schema_.image_height = frame.image->height;
   schema_.image_width = frame.image->width;
   schema_.image_step = frame.image->step;
@@ -149,6 +170,17 @@ void Hdf5Writer::initialize_file(const Frame & frame)
   schema_.joint_names_csv = join_strings(frame.joint_state->names);
   schema_.action_layout = frame.action.layout;
   schema_.action_labels_csv = join_strings(frame.action.labels);
+
+  if (schema_.has_lidar) {
+    schema_.lidar_count = frame.lidar->ranges.size();
+    schema_.lidar_angle_min = frame.lidar->angle_min;
+    schema_.lidar_angle_max = frame.lidar->angle_max;
+    schema_.lidar_angle_increment = frame.lidar->angle_increment;
+    schema_.lidar_time_increment = frame.lidar->time_increment;
+    schema_.lidar_scan_time = frame.lidar->scan_time;
+    schema_.lidar_range_min = frame.lidar->range_min;
+    schema_.lidar_range_max = frame.lidar->range_max;
+  }
 
   if (schema_.image_bytes == 0U) {
     throw std::runtime_error("Image frames must contain pixel data.");
@@ -159,6 +191,9 @@ void Hdf5Writer::initialize_file(const Frame & frame)
   if (schema_.action_count == 0U) {
     throw std::runtime_error("Action frames must contain at least one value.");
   }
+  if (schema_.has_lidar && schema_.lidar_count == 0U) {
+    throw std::runtime_error("Lidar frames must contain at least one range value.");
+  }
 
   file_ = std::make_unique<H5::H5File>(config_.output_path, H5F_ACC_TRUNC);
   file_->createGroup("/meta");
@@ -166,15 +201,20 @@ void Hdf5Writer::initialize_file(const Frame & frame)
   file_->createGroup("/observations");
   file_->createGroup("/observations/images");
   file_->createGroup("/observations/joint_state");
+  if (schema_.has_lidar) {
+    file_->createGroup("/observations/lidar");
+  }
   file_->createGroup("/actions");
 
   auto meta_group = file_->openGroup("/meta");
-  write_string_attribute(meta_group, "schema_version", "0.1.0");
+  write_string_attribute(meta_group, "schema_version", "0.3.0");
   write_string_attribute(meta_group, "namespace_prefix", config_.namespace_prefix);
   write_string_attribute(meta_group, "image_topic", config_.image_topic);
   write_string_attribute(meta_group, "joint_state_topic", config_.joint_state_topic);
+  write_string_attribute(meta_group, "lidar_topic", config_.lidar_topic);
   write_string_attribute(meta_group, "action_topic", config_.action_topic);
   write_string_attribute(meta_group, "joint_action_topic", config_.joint_action_topic);
+  write_string_attribute(meta_group, "cmd_vel_action_topic", config_.cmd_vel_action_topic);
   write_uint64_attribute(meta_group, "batch_size", static_cast<std::uint64_t>(config_.batch_size));
   write_uint64_attribute(meta_group, "sync_slop_ms", static_cast<std::uint64_t>(config_.sync_slop_ms));
 
@@ -187,6 +227,18 @@ void Hdf5Writer::initialize_file(const Frame & frame)
 
   auto joint_group = file_->openGroup("/observations/joint_state");
   write_string_attribute(joint_group, "joint_names_csv", schema_.joint_names_csv);
+
+  if (schema_.has_lidar) {
+    auto lidar_group = file_->openGroup("/observations/lidar");
+    write_uint64_attribute(lidar_group, "beam_count", static_cast<std::uint64_t>(schema_.lidar_count));
+    write_double_attribute(lidar_group, "angle_min", schema_.lidar_angle_min);
+    write_double_attribute(lidar_group, "angle_max", schema_.lidar_angle_max);
+    write_double_attribute(lidar_group, "angle_increment", schema_.lidar_angle_increment);
+    write_double_attribute(lidar_group, "time_increment", schema_.lidar_time_increment);
+    write_double_attribute(lidar_group, "scan_time", schema_.lidar_scan_time);
+    write_double_attribute(lidar_group, "range_min", schema_.lidar_range_min);
+    write_double_attribute(lidar_group, "range_max", schema_.lidar_range_max);
+  }
 
   auto action_group = file_->openGroup("/actions");
   write_string_attribute(action_group, "layout", schema_.action_layout);
@@ -260,6 +312,27 @@ void Hdf5Writer::initialize_file(const Frame & frame)
       action_dataspace,
       action_properties));
 
+  if (schema_.has_lidar) {
+    const hsize_t lidar_initial_dimensions[2] = {0, static_cast<hsize_t>(schema_.lidar_count)};
+    const hsize_t lidar_max_dimensions[2] = {H5S_UNLIMITED, static_cast<hsize_t>(schema_.lidar_count)};
+    const hsize_t lidar_chunk_dimensions[2] = {
+      static_cast<hsize_t>(std::max<std::size_t>(1U, config_.batch_size)),
+      static_cast<hsize_t>(schema_.lidar_count)};
+    const H5::DataSpace lidar_dataspace(2, lidar_initial_dimensions, lidar_max_dimensions);
+    const H5::DSetCreatPropList lidar_properties = make_creation_properties(
+      2, lidar_chunk_dimensions, false);
+    lidar_ranges_dataset_ = std::make_unique<H5::DataSet>(file_->createDataSet(
+        "/observations/lidar/ranges",
+        H5::PredType::NATIVE_DOUBLE,
+        lidar_dataspace,
+        lidar_properties));
+    lidar_intensities_dataset_ = std::make_unique<H5::DataSet>(file_->createDataSet(
+        "/observations/lidar/intensities",
+        H5::PredType::NATIVE_DOUBLE,
+        lidar_dataspace,
+        lidar_properties));
+  }
+
   schema_.initialized = true;
 }
 
@@ -297,6 +370,8 @@ void Hdf5Writer::flush_batch(std::vector<Frame> frames, const bool force_flush)
     std::vector<double> joint_velocities;
     std::vector<double> joint_efforts;
     std::vector<double> actions;
+    std::vector<double> lidar_ranges;
+    std::vector<double> lidar_intensities;
 
     timestamps.reserve(accepted_frames.size());
     episode_indices.reserve(accepted_frames.size());
@@ -305,6 +380,10 @@ void Hdf5Writer::flush_batch(std::vector<Frame> frames, const bool force_flush)
     joint_velocities.reserve(accepted_frames.size() * schema_.joint_count);
     joint_efforts.reserve(accepted_frames.size() * schema_.joint_count);
     actions.reserve(accepted_frames.size() * schema_.action_count);
+    if (schema_.has_lidar) {
+      lidar_ranges.reserve(accepted_frames.size() * schema_.lidar_count);
+      lidar_intensities.reserve(accepted_frames.size() * schema_.lidar_count);
+    }
 
     for (const auto & frame : accepted_frames) {
       episode_indices.push_back(frame.episode_index);
@@ -317,6 +396,11 @@ void Hdf5Writer::flush_batch(std::vector<Frame> frames, const bool force_flush)
       joint_efforts.insert(
         joint_efforts.end(), frame.joint_state->efforts.begin(), frame.joint_state->efforts.end());
       actions.insert(actions.end(), frame.action.values.begin(), frame.action.values.end());
+      if (schema_.has_lidar) {
+        lidar_ranges.insert(lidar_ranges.end(), frame.lidar->ranges.begin(), frame.lidar->ranges.end());
+        lidar_intensities.insert(
+          lidar_intensities.end(), frame.lidar->intensities.begin(), frame.lidar->intensities.end());
+      }
     }
 
     append_1d_u64(*episode_index_dataset_, episode_indices);
@@ -326,6 +410,11 @@ void Hdf5Writer::flush_batch(std::vector<Frame> frames, const bool force_flush)
     append_2d_f64(*joint_velocities_dataset_, joint_velocities, accepted_frames.size(), schema_.joint_count);
     append_2d_f64(*joint_efforts_dataset_, joint_efforts, accepted_frames.size(), schema_.joint_count);
     append_2d_f64(*action_dataset_, actions, accepted_frames.size(), schema_.action_count);
+    if (schema_.has_lidar) {
+      append_2d_f64(*lidar_ranges_dataset_, lidar_ranges, accepted_frames.size(), schema_.lidar_count);
+      append_2d_f64(
+        *lidar_intensities_dataset_, lidar_intensities, accepted_frames.size(), schema_.lidar_count);
+    }
 
     flush_file(force_flush);
   } catch (const H5::Exception & exception) {
@@ -341,17 +430,32 @@ bool Hdf5Writer::validate_frame(const Frame & frame) const
     return false;
   }
 
+  const bool lidar_valid =
+    (!schema_.has_lidar && !frame.lidar) ||
+    (schema_.has_lidar && frame.lidar &&
+    frame.lidar->ranges.size() == schema_.lidar_count &&
+    frame.lidar->intensities.size() == schema_.lidar_count &&
+    frame.lidar->angle_min == schema_.lidar_angle_min &&
+    frame.lidar->angle_max == schema_.lidar_angle_max &&
+    frame.lidar->angle_increment == schema_.lidar_angle_increment &&
+    frame.lidar->time_increment == schema_.lidar_time_increment &&
+    frame.lidar->scan_time == schema_.lidar_scan_time &&
+    frame.lidar->range_min == schema_.lidar_range_min &&
+    frame.lidar->range_max == schema_.lidar_range_max);
+
   return frame.image->data.size() == schema_.image_bytes &&
          frame.image->height == schema_.image_height &&
          frame.image->width == schema_.image_width &&
          frame.image->step == schema_.image_step &&
          frame.image->encoding == schema_.image_encoding &&
+      join_strings(frame.joint_state->names) == schema_.joint_names_csv &&
          frame.joint_state->positions.size() == schema_.joint_count &&
          frame.joint_state->velocities.size() == schema_.joint_count &&
          frame.joint_state->efforts.size() == schema_.joint_count &&
-      frame.action.values.size() == schema_.action_count &&
-      frame.action.layout == schema_.action_layout &&
-      join_strings(frame.action.labels) == schema_.action_labels_csv;
+         frame.action.values.size() == schema_.action_count &&
+         frame.action.layout == schema_.action_layout &&
+         join_strings(frame.action.labels) == schema_.action_labels_csv &&
+         lidar_valid;
 }
 
 void Hdf5Writer::flush_file(const bool force_flush)
@@ -379,6 +483,16 @@ void Hdf5Writer::write_string_attribute(
   const H5::DataSpace scalar_space(H5S_SCALAR);
   H5::Attribute attribute = object.createAttribute(name, string_type, scalar_space);
   attribute.write(string_type, value.c_str());
+}
+
+void Hdf5Writer::write_double_attribute(
+  H5::H5Object & object,
+  const std::string & name,
+  const double value)
+{
+  const H5::DataSpace scalar_space(H5S_SCALAR);
+  H5::Attribute attribute = object.createAttribute(name, H5::PredType::NATIVE_DOUBLE, scalar_space);
+  attribute.write(H5::PredType::NATIVE_DOUBLE, &value);
 }
 
 void Hdf5Writer::write_uint64_attribute(

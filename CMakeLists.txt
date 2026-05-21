@@ -87,6 +87,30 @@ if(BUILD_TESTING)
       std_msgs
     )
   endif()
+
+  ament_add_gtest(test_hdf5_writer
+    test/test_hdf5_writer.cpp
+    src/hdf5_writer.cpp
+  )
+
+  if(TARGET test_hdf5_writer)
+    target_include_directories(test_hdf5_writer
+      PRIVATE
+        include
+        ${HDF5_INCLUDE_DIRS}
+    )
+    ament_target_dependencies(test_hdf5_writer
+      control_msgs
+      geometry_msgs
+      rclcpp
+      sensor_msgs
+      std_msgs
+    )
+    target_link_libraries(test_hdf5_writer
+      ${HDF5_CXX_LIBRARIES}
+      ${HDF5_LIBRARIES}
+    )
+  endif()
 endif()
 
 ament_export_include_directories(include)

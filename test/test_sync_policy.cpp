@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <stdexcept>
+#include <vector>
 
 #include "ros2_robot_data_collector/sync_policy.hpp"
 
@@ -30,6 +31,13 @@ TEST(SyncPolicyTest, RejectsNegativeWindow)
 TEST(SyncPolicyTest, RejectsEmptyTimestampList)
 {
   EXPECT_THROW(timestamp_span_ns({}), std::invalid_argument);
+}
+
+TEST(SyncPolicyTest, AcceptsVectorInputForOptionalStreams)
+{
+  const std::vector<std::int64_t> timestamps = {1000, 1010, 1015, 1020};
+
+  EXPECT_TRUE(timestamps_within_window(timestamps, 20));
 }
 
 }  // namespace ros2_robot_data_collector

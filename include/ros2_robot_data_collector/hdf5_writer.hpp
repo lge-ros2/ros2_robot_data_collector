@@ -36,13 +36,22 @@ private:
   struct SchemaDescription
   {
     bool initialized = false;
+    bool has_lidar = false;
     std::size_t image_bytes = 0;
     std::size_t joint_count = 0;
     std::size_t action_count = 0;
+    std::size_t lidar_count = 0;
     std::uint32_t image_height = 0;
     std::uint32_t image_width = 0;
     std::uint32_t image_step = 0;
     std::uint8_t image_is_bigendian = 0;
+    double lidar_angle_min = 0.0;
+    double lidar_angle_max = 0.0;
+    double lidar_angle_increment = 0.0;
+    double lidar_time_increment = 0.0;
+    double lidar_scan_time = 0.0;
+    double lidar_range_min = 0.0;
+    double lidar_range_max = 0.0;
     std::string image_encoding;
     std::string joint_names_csv;
     std::string action_layout;
@@ -54,6 +63,7 @@ private:
   void flush_batch(std::vector<Frame> frames, bool force_flush);
   bool validate_frame(const Frame & frame) const;
   void flush_file(bool force_flush);
+  void write_double_attribute(H5::H5Object & object, const std::string & name, double value);
   void write_string_attribute(H5::H5Object & object, const std::string & name, const std::string & value);
   void write_uint64_attribute(H5::H5Object & object, const std::string & name, std::uint64_t value);
   void write_uint32_attribute(H5::H5Object & object, const std::string & name, std::uint32_t value);
@@ -90,6 +100,8 @@ private:
   std::unique_ptr<H5::DataSet> joint_velocities_dataset_;
   std::unique_ptr<H5::DataSet> joint_efforts_dataset_;
   std::unique_ptr<H5::DataSet> action_dataset_;
+  std::unique_ptr<H5::DataSet> lidar_ranges_dataset_;
+  std::unique_ptr<H5::DataSet> lidar_intensities_dataset_;
 };
 
 }  // namespace ros2_robot_data_collector
